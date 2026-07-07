@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 
 use rsomics_common::{Result, RsomicsError};
@@ -40,6 +40,7 @@ impl CountTable {
         }
         let n = sample_names.len();
         let mut feature_ids = Vec::new();
+        let mut seen_features = HashSet::new();
         let mut columns: Vec<Vec<u64>> = vec![Vec::new(); n];
         for (row_idx, line) in lines.enumerate() {
             let line = line.map_err(RsomicsError::Io)?;
@@ -48,6 +49,11 @@ impl CountTable {
             }
             let mut fields = line.split(delim);
             let feature = fields.next().unwrap_or("").trim().to_string();
+            if !seen_features.insert(feature.clone()) {
+                return Err(RsomicsError::InvalidInput(format!(
+                    "duplicate taxon '{feature}' in the count table; all taxa must be unique"
+                )));
+            }
             let mut seen = 0usize;
             for (col, field) in fields.enumerate() {
                 if col >= n {
@@ -133,9 +139,9 @@ pub struct Config {
     pub precision: usize,
 }
 
-/// Tree resolved for phydiv: branch length per node (missing → 0.0, matching
-/// scikit-bio's `nan_length_value=0.0`), a tip-name → node map, the node ids in
-/// postorder, and whether the root is bifurcating.
+/// Tree resolved for phydiv: branch length per node (every non-root node must
+/// carry one; the root's is 0.0 since no branch sits above it), a tip-name →
+/// node map, the node ids in postorder, and whether the root is bifurcating.
 struct PhyTree {
     branch_length: Vec<f64>,
     children: Vec<Vec<NodeId>>,
@@ -153,10 +159,16 @@ impl PhyTree {
         let mut tip_index = HashMap::new();
         for node in &tree.nodes {
             children[node.id] = node.children.clone();
-            if let Some(bl) = node.branch_length {
-                branch_length[node.id] = bl;
+            match node.branch_length {
+                Some(bl) => branch_length[node.id] = bl,
+                None if node.id != tree.root => {
+                    return Err(RsomicsError::InvalidInput(
+                        "all non-root nodes in the tree must have a branch length".into(),
+                    ));
+                }
+                None => {}
             }
-            if node.children.is_empty() {
+            if node.children.is_empty() && node.id != tree.root {
                 let name = node
                     .name
                     .as_deref()
@@ -384,16 +396,39 @@ mod tests {
         assert!(Weight::parse("x").is_err());
     }
 
-    #[test]
-    fn unknown_taxon_rejected() {
-        let cfg = Config {
+    fn err_cfg() -> Config {
+        Config {
             delim: '\t',
             rooted: Rooted::Auto,
             weight: Weight::Unweighted,
             precision: 6,
-        };
+        }
+    }
+
+    fn run_err(tree: &Tree, table: &str) -> bool {
         let mut out = Vec::new();
-        let table = "feature\tx\na\t1\nzzz\t1\n";
-        assert!(run(std::io::Cursor::new(table), &mut out, &doc_tree(), &cfg).is_err());
+        run(std::io::Cursor::new(table), &mut out, tree, &err_cfg()).is_err()
+    }
+
+    #[test]
+    fn unknown_taxon_rejected() {
+        assert!(run_err(&doc_tree(), "feature\tx\na\t1\nzzz\t1\n"));
+    }
+
+    #[test]
+    fn missing_branch_length_rejected() {
+        let tree = Tree::from_newick("((a:1,b)c:0.5,(d:1,e:1)f:1)root;").unwrap();
+        assert!(run_err(&tree, "feature\tx\na\t1\nb\t1\n"));
+    }
+
+    #[test]
+    fn duplicate_taxon_rejected() {
+        assert!(run_err(&doc_tree(), "feature\tx\na\t1\na\t2\n"));
+    }
+
+    #[test]
+    fn single_node_tree_has_no_tip() {
+        let tree = Tree::from_newick("a;").unwrap();
+        assert!(run_err(&tree, "feature\tx\na\t1\n"));
     }
 }
