@@ -1,6 +1,6 @@
 [package]
 name = "rsomics-phydiv"
-version = "0.1.1"
+version = "0.1.2"
 description = "Generalized phylogenetic alpha-diversity (rooted/unrooted, abundance-weighted PD) from a feature count table + a Newick tree — scikit-bio phydiv equivalent, value-exact"
 edition = "2024"
 rust-version = "1.91"
